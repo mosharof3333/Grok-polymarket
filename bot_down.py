@@ -141,26 +141,4 @@ while True:
                 continue
 
             open_orders = client.get_orders(OpenOrderParams(token_id=current_token_id))
-            open_ids = [o.get("id") for o in (open_orders if isinstance(open_orders, list) else [])]
-
-            stop_open = current_stop_id in open_ids if current_stop_id else False
-            tp_open   = current_tp_id   in open_ids if current_tp_id   else False
-
-            if current_stop_id and not stop_open:
-                print(f"🔴 [{OUTCOME}] Stop-loss hit → Re-entering")
-                if current_tp_id and tp_open:
-                    client.cancel(current_tp_id)
-                current_stop_id, current_tp_id, current_size = execute_trade(current_token_id, current_size)
-
-            elif current_tp_id and not tp_open:
-                print(f"🟢 [{OUTCOME}] Take-profit hit → Win!")
-                if current_stop_id and stop_open:
-                    client.cancel(current_stop_id)
-                current_stop_id = current_tp_id = None
-
-        time.sleep(1)   # Checks every 1 second
-
-    except Exception as e:
-        if "No active BTC 5-min market found" not in str(e):
-            print(f"⚠️ Error: {e}")
-        time.sleep(1
+            open_ids = [o.get("id") for o in (open_orders if isinstance(open_orders, list) else [])
