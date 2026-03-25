@@ -12,7 +12,7 @@ load_dotenv()
 
 HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
-SIZE = 10.0   # ← Change this if you want bigger/smaller trades
+SIZE = 10.0   # Change this to adjust trade size
 
 POLY_PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY")
 POLY_FUNDER = os.getenv("POLY_FUNDER")
@@ -41,38 +41,39 @@ else:
 OUTCOME = "Up"
 
 def get_current_btc_5m_event():
-    """Fast detection using exact 5-min slug (checks every 1 second)"""
     now = int(time.time())
-    window_start = (now // 300) * 300          # 300 = 5 minutes in seconds
-    slug = f"btc-updown-5m-{window_start}"
+    window_start = (now // 300) * 300
+    candidates = [f"btc-updown-5m-{window_start}", f"btc-updown-5m-{window_start - 300}"]
     
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking for market: {slug}")
+    # Try direct slug access first (fastest)
+    for slug in candidates:
+        try:
+            resp = requests.get(f"https://gamma-api.polymarket.com/events/{slug}", timeout=8)
+            if resp.status_code == 200:
+                event = resp.json()
+                print(f"✅ Found active market (direct): {event.get('title', slug)}")
+                return event
+        except:
+            pass
     
-    # Try current window
+    # Fallback: search all active events (very reliable)
     try:
-        resp = requests.get(f"https://gamma-api.polymarket.com/events/{slug}", timeout=10)
+        resp = requests.get("https://gamma-api.polymarket.com/events?active=true&closed=false&limit=200", timeout=10)
         if resp.status_code == 200:
-            event = resp.json()
-            print(f"✅ Found active market: {event.get('title', slug)}")
-            return event
-    except:
-        pass
+            data = resp.json()
+            events = data if isinstance(data, list) else data.get("data") or data.get("events") or []
+            for event in events:
+                slug = str(event.get("slug", "")).lower()
+                title = str(event.get("title", "")).lower()
+                if "btc-updown-5m" in slug or ("bitcoin up or down" in title and ("5 min" in title or "5m" in slug)):
+                    print(f"✅ Found active market (search): {event.get('title')}")
+                    return event
+    except Exception as e:
+        print(f"Search fallback error: {e}")
     
-    # Try previous window (in case we are at exact boundary)
-    prev_slug = f"btc-updown-5m-{window_start - 300}"
-    try:
-        resp = requests.get(f"https://gamma-api.polymarket.com/events/{prev_slug}", timeout=10)
-        if resp.status_code == 200:
-            event = resp.json()
-            print(f"✅ Found active market (previous window): {event.get('title', prev_slug)}")
-            return event
-    except:
-        pass
-    
-    raise ValueError("No active BTC 5-min market found yet - retrying in 1 second")
+    raise ValueError("No active BTC 5-min market found yet - retrying")
 
 def get_token_id(event, outcome: str):
-    # Modern response format handling
     if "clobTokenIds" in event and "outcomes" in event:
         try:
             idx = event["outcomes"].index(outcome)
@@ -93,17 +94,15 @@ def execute_trade(token_id: str, trade_size: float = SIZE):
     mo = MarketOrderArgs(token_id=token_id, amount=trade_size, side=BUY, order_type=OrderType.FOK)
     signed_mo = client.create_market_order(mo)
     buy_resp = client.post_order(signed_mo, OrderType.FOK)
-    print(f"[{OUTCOME}] Market buy FOK response: {buy_resp}")
+    print(f"[{OUTCOME}] Market buy FOK: {buy_resp}")
 
     filled_size = trade_size
 
-    # Stop-loss @ 0.45
     stop_args = OrderArgs(token_id=token_id, price=0.45, size=filled_size, side=SELL)
     signed_stop = client.create_order(stop_args)
     stop_resp = client.post_order(signed_stop, OrderType.GTC)
     stop_id = stop_resp.get("id") if isinstance(stop_resp, dict) else None
 
-    # Take-profit @ 0.99
     tp_args = OrderArgs(token_id=token_id, price=0.99, size=filled_size, side=SELL)
     signed_tp = client.create_order(tp_args)
     tp_resp = client.post_order(signed_tp, OrderType.GTC)
@@ -113,7 +112,7 @@ def execute_trade(token_id: str, trade_size: float = SIZE):
     return stop_id, tp_id, filled_size
 
 # ===================== MAIN LOOP =====================
-print(f"🚀 Starting BTC 5-min {OUTCOME}-only bot (SIZE = {SIZE} shares) - Checking every 1 second")
+print(f"🚀 Starting BTC 5-min {OUTCOME}-only bot (SIZE = {SIZE} shares)")
 
 last_slug = None
 current_stop_id = None
@@ -126,7 +125,7 @@ while True:
         event = get_current_btc_5m_event()
         slug = event.get("slug") or event.get("id")
 
-        if slug != last_slug:                                   # New 5-min window
+        if slug != last_slug:
             print(f"🟢 NEW WINDOW OPENED: {slug}")
             if current_stop_id or current_tp_id:
                 client.cancel_all()
@@ -135,7 +134,7 @@ while True:
             current_token_id = token_id
             current_stop_id, current_tp_id, current_size = execute_trade(token_id)
 
-        else:                                                   # Same window - monitor orders
+        else:
             if not current_token_id:
                 time.sleep(1)
                 continue
@@ -158,7 +157,7 @@ while True:
                     client.cancel(current_stop_id)
                 current_stop_id = current_tp_id = None
 
-        time.sleep(1)   # ← Checks every 1 second as you requested
+        time.sleep(1)
 
     except Exception as e:
         if "No active BTC 5-min market found" not in str(e):
